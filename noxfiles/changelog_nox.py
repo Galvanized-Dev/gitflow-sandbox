@@ -20,14 +20,14 @@ CHANGELOG_TYPES = [
 
 # Label URLs mapping
 LABEL_URLS = {
-    "high-risk": "https://github.com/galvana/gitflow-sandbox/labels/high-risk",
-    "db-migration": "https://github.com/galvana/gitflow-sandbox/labels/db-migration",
+    "high-risk": "https://github.com/Galvanized-Dev/gitflow-sandbox/labels/high-risk",
+    "db-migration": "https://github.com/Galvanized-Dev/gitflow-sandbox/labels/db-migration",
 }
 
 CHANGELOG_DIR = Path("changelog")
 CHANGELOG_FILE = Path("CHANGELOG.md")
 TEMPLATE_FILE_NAME = "TEMPLATE.yaml"
-GITHUB_REPO = "https://github.com/galvana/gitflow-sandbox"
+GITHUB_REPO = "https://github.com/Galvanized-Dev/gitflow-sandbox"
 
 PLACEHOLDER_DESCRIPTIONS = {
     "Short description of the change",
