@@ -53,11 +53,13 @@ jobs:
           if [[ -n "$INPUT_VERSION" ]]; then
             V="$INPUT_VERSION"
           else
-            mapfile -t branches < <(git ls-remote --heads origin 'hotfix/*' | sed -E 's#.*refs/heads/hotfix/##')
-            if [[ "${#branches[@]}" -ne 1 ]]; then
-              echo "::error::Expected exactly one hotfix/* branch, found: ${branches[*]:-none}. Pass version explicitly."; exit 1
+            # Resolve by the hotfix branch with an OPEN PR into main. Branches are
+            # kept after Finish, so "the only hotfix/* branch" is not reliable.
+            mapfile -t heads < <(gh pr list --base main --state open --json headRefName -q '[.[].headRefName | select(startswith("hotfix/"))] | .[]')
+            if [[ "${#heads[@]}" -ne 1 ]]; then
+              echo "::error::Expected exactly one open hotfix/*->main PR, found: ${heads[*]:-none}. Pass version explicitly."; exit 1
             fi
-            V="${branches[0]}"
+            V="${heads[0]#hotfix/}"
           fi
           B="hotfix/$V"
           # Precondition: the hotfix branch must exist (Start creates it; it is kept after Finish).
@@ -119,14 +121,15 @@ jobs:
             echo "::error::hotfix -> main PR #$PR not approved (state: ${review:-none})"; exit 1
           fi
           # Poll until checks settle (the changelog compile pushed a commit).
-          for _ in $(seq 1 30); do
+          sleep 20 # let the re-triggered checks register before polling
+          for _ in $(seq 1 40); do
             failed=$(gh pr checks "$PR" --json bucket -q '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' || true)
             if [[ "${failed:-0}" != "0" ]]; then
               echo "::error::hotfix -> main PR #$PR has ${failed} failing check(s)"; exit 1
             fi
             pending=$(gh pr checks "$PR" --json bucket -q '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | length' || true)
             [[ "${pending:-0}" == "0" ]] && break
-            sleep 10
+            sleep 15
           done
           pending=$(gh pr checks "$PR" --json bucket -q '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | length' || true)
           if [[ "${pending:-1}" != "0" ]]; then
