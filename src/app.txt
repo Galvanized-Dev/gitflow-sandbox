@@ -2,3 +2,4 @@ v = 1
 feature work
 stabilization fix
 changelog demo feature
+v2.3 feature
