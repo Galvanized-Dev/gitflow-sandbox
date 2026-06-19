@@ -3,7 +3,12 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/galvana/gitflow-sandbox/compare/2.3.0..main)
+## [Unreleased](https://github.com/galvana/gitflow-sandbox/compare/2.3.1..main)
+
+## [2.3.1](https://github.com/galvana/gitflow-sandbox/compare/2.3.0..2.3.1)
+
+### Fixed
+- Critical hotfix for sandbox 2.3.1 test [#11](https://github.com/galvana/gitflow-sandbox/pull/11)
 
 ## [2.3.0](https://github.com/galvana/gitflow-sandbox/compare/2.2.0..2.3.0)
 
