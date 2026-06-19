@@ -1,9 +1,0 @@
-name: (stub) Prod publish
-on:
-  release:
-    types: [released]
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Would publish prod images for ${{ github.event.release.tag_name }}"
