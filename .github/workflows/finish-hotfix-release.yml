@@ -150,39 +150,40 @@ jobs:
           fi
           gh release create "$V" --target main --title "$V" --generate-notes
 
-      - name: Open + auto-merge back-merge into dev (merge commit)
+      - name: Back-merge into dev (merge commit, git-level to bypass the queue)
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           V: ${{ steps.ver.outputs.version }}
           B: ${{ steps.ver.outputs.branch }}
         run: |
           set -euo pipefail
-          merged=$(gh pr list --head "$B" --base dev --state merged --json number -q '.[0].number' || true)
-          if [[ -n "$merged" ]]; then
-            echo "back-merge into dev already merged via #$merged; skipping."
+          git fetch -q origin dev "$B"
+
+          # Idempotency: if the hotfix branch is already merged into dev, done.
+          if git merge-base --is-ancestor "origin/$B" origin/dev; then
+            echo "back-merge already in dev; skipping."
             exit 0
           fi
 
+          # PR for tracking only; actual merge done via git. `gh pr merge` on a
+          # queue-protected branch gets enqueued + squashed (wrong); merging
+          # directly with the App token bypasses the dev queue -> real merge commit.
           PR=$(gh pr list --head "$B" --base dev --state open --json number -q '.[0].number')
           if [[ -z "$PR" ]]; then
             PR=$(gh pr create --base dev --head "$B" \
               --title "Back-merge hotfix $V into dev" \
-              --body "Automated back-merge of \`$B\` into dev (merge commit). Auto-merges when clean; resolve here if conflicts." \
+              --body "Automated back-merge of \`$B\` into dev (merge commit, applied via git to bypass the dev merge queue)." \
               --label backmerge | grep -oE '[0-9]+$')
           fi
 
-          M=UNKNOWN
-          for _ in $(seq 1 15); do
-            M=$(gh pr view "$PR" --json mergeable -q .mergeable)
-            [[ "$M" != "UNKNOWN" ]] && break
-            sleep 4
-          done
-
-          if [[ "$M" == "MERGEABLE" ]]; then
-            gh pr merge "$PR" --merge
-            echo "Back-merge #$PR merged"
-          else
-            gh pr comment "$PR" --body "Back-merge has conflicts ($M) - resolve manually, then merge with a **merge commit**. Re-running Finish will detect the merge and skip." || true
-            echo "::error::Back-merge #$PR not clean ($M); PR #$PR left open for resolution"
+          git config user.name "gitflow-bot"
+          git config user.email "gitflow-bot@users.noreply.github.com"
+          git checkout -q -B dev origin/dev
+          if ! git merge --no-ff "origin/$B" -m "Back-merge hotfix $V into dev (#$PR)"; then
+            git merge --abort || true
+            gh pr comment "$PR" --body "Back-merge has conflicts - resolve manually, then merge. Re-running Finish will detect it and skip." || true
+            echo "::error::Back-merge #$PR has conflicts; PR left open for resolution"
             exit 1
           fi
+          git push origin dev
+          echo "Back-merge #$PR merged into dev as a merge commit"
