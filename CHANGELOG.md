@@ -3,7 +3,12 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.4.0..main)
+## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.5.0..main)
+
+## [2.5.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.4.0..2.5.0)
+
+### Added
+- Org pipeline demo feature [#26](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/26)
 
 ## [2.4.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.3.2..2.4.0)
 
