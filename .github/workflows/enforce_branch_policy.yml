@@ -1,0 +1,21 @@
+name: Enforce Branch Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify source branch is release/* or hotfix/*
+        run: |
+          if [[ ! "${{ github.head_ref }}" =~ ^(release|hotfix)/ ]]; then
+            echo "❌ PRs to main must come from a release/* or hotfix/* branch."
+            echo "Source branch was: ${{ github.head_ref }}"
+            echo ""
+            echo "Feature branches should target dev instead."
+            exit 1
+          fi
+          echo "✅ Source branch '${{ github.head_ref }}' is valid."

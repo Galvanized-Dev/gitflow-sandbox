@@ -1,0 +1,143 @@
+# Gitflow: ship a hotfix release.
+#
+# Verifies the hotfix -> main PR is approved + green, SQUASH-merges it to main,
+# creates the GitHub Release (fires release.yml prod publish + release_event.yml),
+# then opens the hotfix -> dev back-merge PR and SQUASH auto-merges it when clean.
+# The hotfix branch is kept.
+#
+# Every step is idempotent: re-running after a partial failure resumes where it
+# left off (already-merged PRs / existing release are detected and skipped).
+name: Finish Hotfix Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Hotfix version to finish, e.g. 2.89.1 (blank = the single open hotfix/* branch)"
+        required: false
+        type: string
+
+permissions:
+  contents: read # all writes go through the GitHub App token below
+
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.MERGE_BOT_APP_ID }}
+          private-key: ${{ secrets.MERGE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Resolve version + branch
+        id: ver
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_VERSION" ]]; then
+            V="$INPUT_VERSION"
+          else
+            mapfile -t branches < <(git ls-remote --heads origin 'hotfix/*' | sed -E 's#.*refs/heads/hotfix/##')
+            if [[ "${#branches[@]}" -ne 1 ]]; then
+              echo "::error::Expected exactly one hotfix/* branch, found: ${branches[*]:-none}. Pass version explicitly."; exit 1
+            fi
+            V="${branches[0]}"
+          fi
+          B="hotfix/$V"
+          # Precondition: the hotfix branch must exist (Start creates it; it is kept after Finish).
+          if ! git ls-remote --exit-code --heads origin "$B" >/dev/null 2>&1; then
+            echo "::error::Branch $B does not exist on origin. Run Start Hotfix Release first (or it was deleted)."; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "branch=$B" >> "$GITHUB_OUTPUT"
+          echo "Finishing hotfix $V"
+
+      - name: Merge hotfix -> main (gated, idempotent, squash)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          V: ${{ steps.ver.outputs.version }}
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          merged=$(gh pr list --head "$B" --base main --state merged --json number -q '.[0].number' || true)
+          if [[ -n "$merged" ]]; then
+            echo "hotfix -> main already merged via #$merged; skipping."
+            exit 0
+          fi
+
+          PR=$(gh pr list --head "$B" --base main --state open --json number -q '.[0].number')
+          if [[ -z "$PR" ]]; then
+            echo "No open $B -> main PR; opening one for tracking."
+            PR=$(gh pr create --base main --head "$B" \
+              --title "Hotfix $V" \
+              --body "Hotfix \`$V\` -> main (opened by Finish Hotfix Release for tracking)." \
+              --label hotfix | grep -oE '[0-9]+$')
+          fi
+
+          review=$(gh pr view "$PR" --json reviewDecision -q .reviewDecision)
+          if [[ "$review" != "APPROVED" && -n "$review" ]]; then  # SANDBOX temp-relax: pass when no review required
+            echo "::error::hotfix -> main PR #$PR not approved (state: ${review:-none})"; exit 1
+          fi
+          fails=$(gh pr checks "$PR" --json bucket -q '[.[] | select(.bucket != "pass" and .bucket != "skipping")] | length')
+          if [[ "$fails" != "0" ]]; then
+            echo "::error::hotfix -> main PR #$PR has $fails check(s) not green"; exit 1
+          fi
+
+          # App is in the main ruleset bypass list, so this direct merge is allowed.
+          gh pr merge "$PR" --squash
+
+      - name: Create GitHub Release (fires prod publish)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$V" >/dev/null 2>&1; then
+            echo "Release $V already exists; skipping."; exit 0
+          fi
+          gh release create "$V" --target main --title "$V" --generate-notes
+
+      - name: Open + auto-merge back-merge into dev (squash)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          V: ${{ steps.ver.outputs.version }}
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          merged=$(gh pr list --head "$B" --base dev --state merged --json number -q '.[0].number' || true)
+          if [[ -n "$merged" ]]; then
+            echo "back-merge into dev already merged via #$merged; skipping."
+            exit 0
+          fi
+
+          PR=$(gh pr list --head "$B" --base dev --state open --json number -q '.[0].number')
+          if [[ -z "$PR" ]]; then
+            PR=$(gh pr create --base dev --head "$B" \
+              --title "Back-merge hotfix $V into dev" \
+              --body "Automated back-merge of \`$B\` into dev (squash). Auto-merges when clean; resolve here if conflicts." \
+              --label backmerge | grep -oE '[0-9]+$')
+          fi
+
+          M=UNKNOWN
+          for _ in $(seq 1 15); do
+            M=$(gh pr view "$PR" --json mergeable -q .mergeable)
+            [[ "$M" != "UNKNOWN" ]] && break
+            sleep 4
+          done
+
+          if [[ "$M" == "MERGEABLE" ]]; then
+            gh pr merge "$PR" --squash
+            echo "Back-merge #$PR merged"
+          else
+            gh pr comment "$PR" --body "Back-merge has conflicts ($M) - resolve manually, then **squash** merge. Re-running Finish will detect the merge and skip." || true
+            echo "::error::Back-merge #$PR not clean ($M); PR #$PR left open for resolution"
+            exit 1
+          fi

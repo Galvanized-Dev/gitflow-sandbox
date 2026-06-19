@@ -1,0 +1,84 @@
+# Gitflow: begin a hotfix release.
+#
+# Cuts hotfix/X.Y.Z off main (the production line) and opens the hotfix -> main
+# PR. Fixes target the hotfix branch; each merge auto-cuts a new RC (auto-rc.yml).
+# Shipped to main by Finish Hotfix Release (requires approval + green checks),
+# which squash-merges to main and dev.
+name: Start Hotfix Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Hotfix version, e.g. 2.89.1 (blank = auto next patch from latest tag)"
+        required: false
+        type: string
+
+permissions:
+  contents: read # all writes go through the GitHub App token below
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.MERGE_BOT_APP_ID }}
+          private-key: ${{ secrets.MERGE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Compute version + branch
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_VERSION" ]]; then
+            V="$INPUT_VERSION"
+          else
+            # highest final tag, then bump the patch
+            latest=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            IFS=. read -r MA MI PA <<< "$latest"
+            V="$MA.$MI.$((PA + 1))"
+            echo "Latest final tag: $latest -> next patch: $V"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "branch=hotfix/$V" >> "$GITHUB_OUTPUT"
+
+      - name: Create hotfix branch
+        env:
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # Idempotent: skip creation if the branch already exists (re-run safe).
+          if git ls-remote --exit-code --heads origin "$B" >/dev/null 2>&1; then
+            echo "$B already exists; skipping creation (idempotent re-run)."
+          else
+            # Pushing the new branch fires auto-rc.yml, which cuts rc0.
+            git push origin "main:refs/heads/$B"
+          fi
+
+      - name: Open hotfix -> main PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          V: ${{ steps.ver.outputs.version }}
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if gh pr list --head "$B" --base main --state open --json number -q '.[0].number' | grep -q '[0-9]'; then
+            echo "hotfix -> main PR already open"; exit 0
+          fi
+          gh pr create --base main --head "$B" \
+            --title "Hotfix $V" \
+            --body "Hotfix \`$V\` off \`main\`.
+
+          Fixes target \`$B\`; each merge cuts a new RC automatically.
+
+          Shipped to \`main\` by **Finish Hotfix Release** (requires approval + green checks), which squash-merges to \`main\` and \`dev\`." \
+            --label hotfix

@@ -1,0 +1,57 @@
+# Gitflow: auto-cut a release candidate on every push to a release/hotfix branch.
+#
+# Each landed stabilization PR (or the initial branch creation) pushes the
+# branch, which fires this workflow. It derives the version from the branch
+# name and pushes the next X.Y.ZrcN tag. That tag triggers the existing
+# docker_fidesplus_release_candidate.yml build.
+name: Auto RC
+
+on:
+  push:
+    branches:
+      - "release/**"
+      - "hotfix/**"
+
+# Serialize per branch so rapid pushes don't race on the rc number.
+concurrency:
+  group: auto-rc-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cut-rc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.MERGE_BOT_APP_ID }}
+          private-key: ${{ secrets.MERGE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # need existing rc tags to compute the next number
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Cut next rc tag
+        env:
+          V: ${{ github.ref_name }} # release/2.89.0 or hotfix/2.89.1
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          V="${V#*/}" # strip release/ or hotfix/ prefix -> 2.89.0
+          # Idempotency: if this exact commit already has an rc tag, don't cut another.
+          existing=$(git tag --points-at "$SHA" | grep -E "^${V}rc[0-9]+$" || true)
+          if [[ -n "$existing" ]]; then
+            echo "Commit already tagged: $existing; skipping."
+            exit 0
+          fi
+          # highest existing rcN for this version (numeric), then +1; start at 0
+          last=$(git tag --list "${V}rc*" | sed -E "s/^${V}rc//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          if [[ -z "${last:-}" ]]; then N=0; else N=$((last + 1)); fi
+          TAG="${V}rc${N}"
+          echo "Cutting $TAG at $SHA"
+          git tag "$TAG" "$SHA"
+          git push origin "$TAG"

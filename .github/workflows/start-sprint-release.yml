@@ -1,0 +1,84 @@
+# Gitflow: begin a sprint release.
+#
+# Cuts release/X.Y.0 off dev and opens the release -> main PR that accrues
+# review + checks all sprint. Stabilization PRs target the release branch; each
+# merge auto-cuts a new RC (see auto-rc.yml). The release is shipped to main by
+# Finish Sprint Release (requires approval + green checks).
+name: Start Sprint Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 2.89.0 (blank = auto next minor from latest tag)"
+        required: false
+        type: string
+
+permissions:
+  contents: read # all writes go through the GitHub App token below
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.MERGE_BOT_APP_ID }}
+          private-key: ${{ secrets.MERGE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0 # need full tag history to compute the next version
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Compute version + branch
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_VERSION" ]]; then
+            V="$INPUT_VERSION"
+          else
+            # highest final (non-prerelease) tag, then bump the minor
+            latest=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            IFS=. read -r MA MI _ <<< "$latest"
+            V="$MA.$((MI + 1)).0"
+            echo "Latest final tag: $latest -> next minor: $V"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "branch=release/$V" >> "$GITHUB_OUTPUT"
+
+      - name: Create release branch
+        env:
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # Idempotent: skip creation if the branch already exists (re-run safe).
+          if git ls-remote --exit-code --heads origin "$B" >/dev/null 2>&1; then
+            echo "$B already exists; skipping creation (idempotent re-run)."
+          else
+            # Pushing the new branch fires auto-rc.yml, which cuts rc0.
+            git push origin "dev:refs/heads/$B"
+          fi
+
+      - name: Open release -> main PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          V: ${{ steps.ver.outputs.version }}
+          B: ${{ steps.ver.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if gh pr list --head "$B" --base main --state open --json number -q '.[0].number' | grep -q '[0-9]'; then
+            echo "release -> main PR already open"; exit 0
+          fi
+          gh pr create --base main --head "$B" \
+            --title "Release $V" \
+            --body "Sprint release \`$V\`.
+
+          Stabilization fixes target \`$B\`; each merge cuts a new RC automatically.
+
+          Shipped to \`main\` by **Finish Sprint Release** (requires approval + green checks), which also tags the release, publishes prod images, and opens the back-merge into \`dev\`." \
+            --label release
