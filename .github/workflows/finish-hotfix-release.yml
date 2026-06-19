@@ -1,9 +1,10 @@
 # Gitflow: ship a hotfix release.
 #
-# Verifies the hotfix -> main PR is approved + green, SQUASH-merges it to main,
-# creates the GitHub Release (fires release.yml prod publish + release_event.yml),
-# then opens the hotfix -> dev back-merge PR and SQUASH auto-merges it when clean.
-# The hotfix branch is kept.
+# Verifies the hotfix -> main PR is approved + green, MERGE-commits it to main
+# (fixes are squashed INTO the hotfix branch; the hotfix itself merges as a
+# commit so main/dev histories stay reconciled), creates the GitHub Release
+# (fires release.yml prod publish + release_event.yml), then opens the
+# hotfix -> dev back-merge PR and merge-commits it when clean. The branch is kept.
 #
 # Every step is idempotent: re-running after a partial failure resumes where it
 # left off (already-merged PRs / existing release are detected and skipped).
@@ -13,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Hotfix version to finish, e.g. 2.89.1 (blank = the single open hotfix/* branch)"
+        description: "Hotfix version to finish, e.g. 2.89.1 (blank = next patch from the latest tag)"
         required: false
         type: string
 
@@ -53,13 +54,12 @@ jobs:
           if [[ -n "$INPUT_VERSION" ]]; then
             V="$INPUT_VERSION"
           else
-            # Resolve by the hotfix branch with an OPEN PR into main. Branches are
-            # kept after Finish, so "the only hotfix/* branch" is not reliable.
-            mapfile -t heads < <(gh pr list --base main --state open --json headRefName -q '[.[].headRefName | select(startswith("hotfix/"))] | .[]')
-            if [[ "${#heads[@]}" -ne 1 ]]; then
-              echo "::error::Expected exactly one open hotfix/*->main PR, found: ${heads[*]:-none}. Pass version explicitly."; exit 1
-            fi
-            V="${heads[0]#hotfix/}"
+            # Hotfix version = next patch from the latest final tag (same rule as
+            # Start Hotfix), so blank-version Finish targets the in-flight hotfix
+            # without relying on an open PR (the hotfix->main PR opens at Finish).
+            latest=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            IFS=. read -r MA MI PA <<< "$latest"
+            V="$MA.$MI.$((PA + 1))"
           fi
           B="hotfix/$V"
           # Precondition: the hotfix branch must exist (Start creates it; it is kept after Finish).
@@ -94,7 +94,7 @@ jobs:
             echo "compiled changelog + pushed to $B"
           fi
 
-      - name: Merge hotfix -> main (gated, idempotent, squash)
+      - name: Merge hotfix -> main (gated, idempotent, merge commit)
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           V: ${{ steps.ver.outputs.version }}
@@ -137,7 +137,7 @@ jobs:
           fi
 
           # App is in the main ruleset bypass list, so this direct merge is allowed.
-          gh pr merge "$PR" --squash
+          gh pr merge "$PR" --merge
 
       - name: Create GitHub Release (fires prod publish)
         env:
@@ -150,7 +150,7 @@ jobs:
           fi
           gh release create "$V" --target main --title "$V" --generate-notes
 
-      - name: Open + auto-merge back-merge into dev (squash)
+      - name: Open + auto-merge back-merge into dev (merge commit)
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           V: ${{ steps.ver.outputs.version }}
@@ -167,7 +167,7 @@ jobs:
           if [[ -z "$PR" ]]; then
             PR=$(gh pr create --base dev --head "$B" \
               --title "Back-merge hotfix $V into dev" \
-              --body "Automated back-merge of \`$B\` into dev (squash). Auto-merges when clean; resolve here if conflicts." \
+              --body "Automated back-merge of \`$B\` into dev (merge commit). Auto-merges when clean; resolve here if conflicts." \
               --label backmerge | grep -oE '[0-9]+$')
           fi
 
@@ -179,10 +179,10 @@ jobs:
           done
 
           if [[ "$M" == "MERGEABLE" ]]; then
-            gh pr merge "$PR" --squash
+            gh pr merge "$PR" --merge
             echo "Back-merge #$PR merged"
           else
-            gh pr comment "$PR" --body "Back-merge has conflicts ($M) - resolve manually, then **squash** merge. Re-running Finish will detect the merge and skip." || true
+            gh pr comment "$PR" --body "Back-merge has conflicts ($M) - resolve manually, then merge with a **merge commit**. Re-running Finish will detect the merge and skip." || true
             echo "::error::Back-merge #$PR not clean ($M); PR #$PR left open for resolution"
             exit 1
           fi
