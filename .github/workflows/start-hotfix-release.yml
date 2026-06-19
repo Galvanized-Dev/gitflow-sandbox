@@ -74,6 +74,13 @@ jobs:
           if gh pr list --head "$B" --base main --state open --json number -q '.[0].number' | grep -q '[0-9]'; then
             echo "hotfix -> main PR already open"; exit 0
           fi
+          # A fresh hotfix branch == main (no fix yet) -> no diff to PR. Skip now;
+          # the PR is opened once a fix lands, or by Finish (create-if-missing).
+          git fetch -q origin main
+          if [[ "$(git rev-list --count "origin/main..origin/$B")" == "0" ]]; then
+            echo "No commits on $B yet; PR will be opened when a fix lands or by Finish."
+            exit 0
+          fi
           gh pr create --base main --head "$B" \
             --title "Hotfix $V" \
             --body "Hotfix \`$V\` off \`main\`.
