@@ -3,7 +3,12 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.0..main)
+## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.1..main)
+
+## [2.6.1](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.0..2.6.1)
+
+### Fixed
+- Urgent 2.6.1 patch [#34](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/34)
 
 ## [2.6.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.5.0..2.6.0)
 
