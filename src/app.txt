@@ -3,4 +3,4 @@ feature work
 stabilization fix
 changelog demo feature
 v2.3 feature
-critical hotfix
+RELEASE-SIDE CHANGE
