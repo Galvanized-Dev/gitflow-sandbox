@@ -136,8 +136,20 @@ jobs:
             echo "::error::hotfix -> main PR #$PR checks not green after wait"; exit 1
           fi
 
-          # App is in the main ruleset bypass list, so this direct merge is allowed.
+          # main has a light merge queue (merge_method=MERGE). gh pr merge ENQUEUES
+          # (queue method wins); the queue lands a merge commit, never a squash
+          # (a squashed hotfix->main re-diverges main from dev, #5). Wait for it
+          # before the Release + back-merge steps.
           gh pr merge "$PR" --merge
+          echo "Enqueued #$PR into the main merge queue; waiting for it to land..."
+          for _ in $(seq 1 40); do
+            [[ "$(gh pr view "$PR" --json state -q .state)" == "MERGED" ]] && break
+            sleep 15
+          done
+          if [[ "$(gh pr view "$PR" --json state -q .state)" != "MERGED" ]]; then
+            echo "::error::hotfix -> main PR #$PR not merged by the queue in time (check merge_group CI)"; exit 1
+          fi
+          echo "hotfix -> main #$PR merged (merge commit, via queue)"
 
       - name: Create GitHub Release (fires prod publish)
         env:

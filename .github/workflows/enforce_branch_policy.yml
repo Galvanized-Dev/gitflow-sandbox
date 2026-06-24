@@ -4,6 +4,12 @@ on:
   pull_request:
     branches:
       - main
+  # Must also run in the merge queue: main's required check is check-source-branch,
+  # and a merge queue only merges once every required check reports green in the
+  # merge_group context. Without this trigger the check is missing in the queue and
+  # the merge never lands. The source ref was already validated at PR time, so the
+  # merge_group run just passes.
+  merge_group:
 
 jobs:
   check-source-branch:
@@ -11,6 +17,10 @@ jobs:
     steps:
       - name: Verify source branch is release/* or hotfix/*
         run: |
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            echo "✅ merge_group: source branch already validated at PR time."
+            exit 0
+          fi
           if [[ ! "${{ github.head_ref }}" =~ ^(release|hotfix)/ ]]; then
             echo "❌ PRs to main must come from a release/* or hotfix/* branch."
             echo "Source branch was: ${{ github.head_ref }}"
