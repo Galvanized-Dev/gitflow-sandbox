@@ -1,16 +1,27 @@
-# Gitflow: begin a hotfix release.
+# Gitflow: begin a patch (hotfix) release — fix-first.
 #
-# Cuts hotfix/X.Y.Z off main (the production line) and opens the hotfix -> main
-# PR. Fixes target the hotfix branch; each merge auto-cuts a new RC (auto-rc.yml).
-# Shipped to main by Finish Hotfix Release (requires approval + green checks),
-# which squash-merges to main and dev.
+# A patch ships an ALREADY-REVIEWED fix to prod, so this never cuts an empty
+# branch: it requires the fix commit(s) up front, cuts hotfix/X.Y.Z off the last
+# release TAG (a clean patch base, not main HEAD), cherry-picks the fix onto it,
+# and pushes. The non-empty branch lets the hotfix -> main PR open immediately
+# (at Start, not Finish), and the push fires auto-rc.yml -> rc0.
+#
+# The fix is expected to already live on dev (reviewed there); pass its squash
+# SHA(s). The start-patch-release skill resolves a dev PR number to its SHA and
+# dispatches this workflow.
+#
+# Shipped to main + dev by Finish Hotfix Release (approval + green required).
 name: Start Hotfix Release
 
 on:
   workflow_dispatch:
     inputs:
+      fix_commits:
+        description: "Space/comma-separated commit SHA(s) to cherry-pick (the already-reviewed fix, normally from dev)"
+        required: true
+        type: string
       version:
-        description: "Hotfix version, e.g. 2.89.1 (blank = auto next patch from latest tag)"
+        description: "Patch version, e.g. 2.89.1 (blank = auto next patch from latest final tag)"
         required: false
         type: string
 
@@ -33,59 +44,82 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app.outputs.token }}
 
-      - name: Compute version + branch
+      - name: Compute version + base tag
         id: ver
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          git fetch --tags --quiet origin
+          # The patch base is the highest final release tag (X.Y.Z, no pre-release).
+          base=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          [[ -n "$base" ]] || { echo "::error::No final release tag found to patch from."; exit 1; }
           if [[ -n "$INPUT_VERSION" ]]; then
             V="$INPUT_VERSION"
           else
-            # highest final tag, then bump the patch
-            latest=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
-            IFS=. read -r MA MI PA <<< "$latest"
+            IFS=. read -r MA MI PA <<< "$base"
             V="$MA.$MI.$((PA + 1))"
-            echo "Latest final tag: $latest -> next patch: $V"
           fi
+          echo "Patch base tag: $base -> version: $V"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "branch=hotfix/$V" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
-      - name: Create hotfix branch
+      - name: Cut hotfix branch off the base tag + cherry-pick the fix
         env:
+          V: ${{ steps.ver.outputs.version }}
           B: ${{ steps.ver.outputs.branch }}
+          BASE: ${{ steps.ver.outputs.base }}
+          FIX_COMMITS: ${{ inputs.fix_commits }}
         run: |
           set -euo pipefail
-          # Idempotent: skip creation if the branch already exists (re-run safe).
+          # Idempotent: a re-run after the branch exists skips the cut + cherry-pick.
           if git ls-remote --exit-code --heads origin "$B" >/dev/null 2>&1; then
-            echo "$B already exists; skipping creation (idempotent re-run)."
-          else
-            # Pushing the new branch fires auto-rc.yml, which cuts rc0.
-            git push origin "main:refs/heads/$B"
+            echo "$B already exists; skipping cut + cherry-pick (idempotent re-run)."
+            exit 0
           fi
+
+          # Normalize the SHA list (commas/whitespace -> spaces) and verify each.
+          shas=$(echo "$FIX_COMMITS" | tr ',' ' ')
+          [[ -n "${shas// }" ]] || { echo "::error::fix_commits is empty."; exit 1; }
+          for s in $shas; do
+            git cat-file -e "${s}^{commit}" 2>/dev/null || { echo "::error::commit $s not found in history."; exit 1; }
+          done
+
+          git config user.name "fides-release-bot[bot]"
+          git config user.email "fides-release-bot@users.noreply.github.com"
+
+          # Branch off the base tag (clean patch base), cherry-pick, then push.
+          git checkout -B "$B" "$BASE"
+          for s in $shas; do
+            # -x appends "(cherry picked from commit <sha>)" -> traces the patch
+            # commit back to its reviewed dev original.
+            if ! git cherry-pick -x "$s"; then
+              git cherry-pick --abort || true
+              echo "::error::cherry-pick of $s onto $B conflicts. Resolve on a local $B off tag $BASE, push it, then re-run (idempotent)."
+              exit 1
+            fi
+          done
+
+          # Pushing the non-empty branch fires auto-rc.yml -> rc0.
+          git push origin "$B"
 
       - name: Open hotfix -> main PR
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           V: ${{ steps.ver.outputs.version }}
           B: ${{ steps.ver.outputs.branch }}
+          BASE: ${{ steps.ver.outputs.base }}
         run: |
           set -euo pipefail
           if gh pr list --head "$B" --base main --state open --json number -q '.[0].number' | grep -q '[0-9]'; then
             echo "hotfix -> main PR already open"; exit 0
           fi
-          # A fresh hotfix branch == main (no fix yet) -> no diff to PR. Skip now;
-          # the PR is opened once a fix lands, or by Finish (create-if-missing).
-          git fetch -q origin main
-          if [[ "$(git rev-list --count "origin/main..origin/$B")" == "0" ]]; then
-            echo "No commits on $B yet; PR will be opened when a fix lands or by Finish."
-            exit 0
-          fi
           gh pr create --base main --head "$B" \
             --title "Hotfix $V" \
-            --body "Hotfix \`$V\` off \`main\`.
+            --body "Patch \`$V\` off tag \`$BASE\`, carrying the cherry-picked fix.
 
-          Fixes target \`$B\`; each merge cuts a new RC automatically.
+          Add further fixes by PR into \`$B\`; each push cuts a new RC automatically.
 
-          Shipped to \`main\` by **Finish Hotfix Release** (requires approval + green checks), which squash-merges to \`main\` and \`dev\`." \
+          Shipped to \`main\` and back-merged to \`dev\` by **Finish Hotfix Release** (requires approval + green checks)." \
             --label hotfix
