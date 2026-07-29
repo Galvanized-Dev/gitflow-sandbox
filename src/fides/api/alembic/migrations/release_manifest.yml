@@ -6,3 +6,4 @@
 # any N-1 back-compat lint bounds itself at.
 releases:
   "2.0": "a00000000002"
+  "2.10": "d00000000001"
