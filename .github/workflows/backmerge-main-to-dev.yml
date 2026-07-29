@@ -1,0 +1,407 @@
+# Land the release back-merge on `dev` as a MERGE COMMIT, via a reviewable PR, without
+# anyone touching branch protection.
+#
+# Why this exists: `dev` requires a pull request and runs a SQUASH merge queue, but the
+# back-merge has to land as a merge commit — squashing it collapses the two parents and
+# re-diverges `main` from `dev`, which is the whole point of back-merging. The only route
+# is a direct push, which protection refuses, so this was done by a repo admin briefly
+# deleting `enforce_admins` and restoring it afterwards. That made it a one-person job and
+# left `dev` unprotected if the run died in between.
+#
+# Here it runs as a GitHub App that holds a standing bypass on `dev`, so anyone with write
+# access can dispatch it and protection is never modified.
+#
+# ---------------------------------------------------------------------------
+# HOW IT WORKS: two phases, so the back-merge is reviewed before it lands
+# ---------------------------------------------------------------------------
+#
+# The merge never goes straight onto `dev`. It is built on a `backmerge/*` branch and
+# opened as a DRAFT PR into `dev` first, so what gets back-merged is one reviewable diff
+# with a commit list, not loose commits appearing on `dev`. A second dispatch lands it.
+#
+#   1. PREPARE (default)   gh workflow run "Back-merge main into dev"
+#      Builds `backmerge/<version>-to-dev` from `dev` with `main` merged into it, pushes
+#      it, and opens (or refreshes) a draft PR into `dev`. Nothing on `dev` moves.
+#
+#   2. REVIEW + APPROVE    the draft PR — commits, diff, CI
+#      Do NOT use the merge button. The squash queue would collapse the merge commit.
+#      The PR is a draft precisely so it cannot be queued. Approve it instead:
+#        gh pr review <n> --approve
+#      `land` refuses without an approving review on the exact commit it is about to push,
+#      and refuses if anyone has changes requested. Approvals of an earlier tip are stale.
+#      (If a reviewer cannot approve a draft, `gh pr ready <n>` then approve — `land`
+#      re-verifies ancestry and approval at push time either way.)
+#
+#   3. LAND                gh workflow run "Back-merge main into dev" \
+#                            -f source=backmerge/<version>-to-dev -f land=true
+#      Re-checks the approval and that the branch still contains both `main` and `dev`,
+#      fast-forwards `dev` onto it (so the merge commit survives), verifies `main` is now
+#      an ancestor of `dev`, then comments the landed SHA and approver on the PR, closes
+#      it, and deletes the branch. The closed PR is the audit record.
+#
+# CONFLICTS — the only manual path.
+# `prepare` never pushes a half-merged branch. If merging `main` into `dev` conflicts it
+# aborts, leaves both branches untouched, and prints the recipe: resolve on the
+# `backmerge/*` branch (NEVER by merging `dev` into a release branch — that poisons the
+# release -> main PR), push it, then re-dispatch `prepare` with that branch as `source` to
+# get the PR, and `land` as usual. The verify-release skill's `backmerge-resolve.sh`
+# automates the resolution.
+#
+# So `source` is either:
+#   main             — let the bot build the merge (the normal case)
+#   backmerge/*      — a branch that already carries the merge, bot-built or a human's
+#                      conflict resolution of it
+# It can never be used to land a feature branch on `dev`: `land` re-checks that the branch
+# contains both `origin/main` and `origin/dev` before pushing.
+#
+# Requires once, from a repo admin — the App needs to bypass dev's pull request rule:
+#   gh api -X PATCH repos/ethyca/fidesplus/branches/dev/protection/required_pull_request_reviews \
+#     -f 'bypass_pull_request_allowances[apps][]=<app-slug>'
+# The App also needs `pull_requests: write` to open, comment on, and close the audit PR.
+#
+# Note: the audit PR triggers the normal `dev` PR checks. That is real signal — it tests
+# the integration of `main` and `dev` — but it is a full CI run once per release. Checks on
+# it are informational; the merge lands by push, not by the queue.
+# MIRROR OF ethyca/fidesplus .github/workflows/backmerge-main-to-dev.yml — kept
+# byte-identical on purpose. This repo is the test bed for the Talos release skills, so
+# the commands the skills run here must be the commands they run in fidesplus. If the
+# fidesplus copy changes, re-copy it rather than hand-editing this one.
+#
+# The App secrets and the `dev` ruleset bypass this needs are already provisioned here
+# (see SETUP.md); nothing sandbox-specific is required.
+name: Back-merge main into dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Ref to merge into dev: main, or a backmerge/* branch that already carries the merge"
+        required: false
+        default: main
+        type: string
+      land:
+        description: "Land the reviewed back-merge on dev (requires source=backmerge/*). Leave off to prepare the branch and PR."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read # the push and the PR calls below go through the GitHub App token
+
+jobs:
+  backmerge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.MERGE_BOT_APP_ID }}
+          private-key: ${{ secrets.MERGE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Resolve inputs
+        id: cfg
+        env:
+          SRC: ${{ inputs.source }}
+          LAND: ${{ inputs.land }}
+        run: |
+          set -euo pipefail
+
+          # Allowlist. Anything landing on dev this way is either already on main, or a
+          # resolution of that same back-merge. Keeps this from becoming a way around
+          # review for ordinary changes.
+          if [[ "$SRC" != "main" && "$SRC" != backmerge/* ]]; then
+            echo "::error::source must be 'main' or a 'backmerge/*' branch, got '$SRC'."
+            exit 1
+          fi
+
+          # Landing is always a fast-forward onto a branch that was prepared and reviewed.
+          # There is no path that builds a merge and pushes it to dev in one shot.
+          if [[ "$LAND" == "true" && "$SRC" != backmerge/* ]]; then
+            echo "::error::land=true needs a prepared branch. Dispatch without 'land' first to build 'backmerge/<version>-to-dev' and open its PR, then re-dispatch with -f source=backmerge/<version>-to-dev -f land=true."
+            exit 1
+          fi
+
+          git fetch --quiet --tags origin main dev
+          git fetch --quiet origin "$SRC" || true # a backmerge/* branch may not exist yet
+
+          version=$(git describe --tags --abbrev=0 origin/main 2>/dev/null || echo "unversioned")
+          if [[ "$SRC" == backmerge/* ]]; then
+            branch="$SRC"
+          else
+            branch="backmerge/${version}-to-dev"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "Source: $SRC | branch: $branch | release: $version | land: $LAND"
+
+      - name: Prepare the back-merge branch and PR
+        if: ${{ inputs.land != true }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SRC: ${{ inputs.source }}
+          BRANCH: ${{ steps.cfg.outputs.branch }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          # Idempotent: main is already in dev (landed by an earlier run, or by hand).
+          if git merge-base --is-ancestor origin/main origin/dev; then
+            echo "origin/main is already an ancestor of dev; nothing to back-merge."
+            exit 0
+          fi
+
+          git config user.name "fides-release-bot[bot]"
+          git config user.email "fides-release-bot@users.noreply.github.com"
+
+          conflict_recipe() {
+            cat <<MSG
+          === Conflict resolution ===
+          Resolve on the back-merge branch, never by merging dev into a release branch
+          (that poisons the release -> main PR):
+
+            git fetch origin
+            git checkout -B $BRANCH origin/$BRANCH 2>/dev/null || git checkout -b $BRANCH origin/dev
+            git merge origin/main      # resolve the conflicts HERE
+            git add -A && git commit
+            git push origin $BRANCH
+
+          Then get the PR, review it, and land it:
+
+            gh workflow run "Back-merge main into dev" -f source=$BRANCH
+            gh workflow run "Back-merge main into dev" -f source=$BRANCH -f land=true
+
+          The verify-release skill's backmerge-resolve.sh automates the resolution.
+          MSG
+          }
+
+          # Commit list for the PR body, computed before anything is merged locally.
+          commit_count=$(git rev-list --count --no-merges origin/dev..origin/main)
+          git log -n 200 --no-merges --format='- %h %s' origin/dev..origin/main > /tmp/commits.md
+
+          if git rev-parse --verify -q "refs/remotes/origin/$BRANCH" >/dev/null; then
+            echo "Refreshing existing $BRANCH."
+            git checkout -q -B "$BRANCH" "origin/$BRANCH"
+            # Pick up anything that moved since the branch was built. Merging dev first
+            # keeps the branch fast-forwardable onto dev.
+            for ref in dev main; do
+              if ! git merge-base --is-ancestor "origin/$ref" HEAD; then
+                if ! git merge --no-ff --no-edit "origin/$ref" -m "Merge $ref into $BRANCH"; then
+                  git merge --abort
+                  echo "::error::Merging $ref into $BRANCH conflicts. Nothing was pushed; $BRANCH and dev are untouched."
+                  conflict_recipe
+                  exit 1
+                fi
+              fi
+            done
+          else
+            # Built off dev so dev stays the first parent of the merge and the branch
+            # fast-forwards onto dev at land time.
+            git checkout -q -B "$BRANCH" origin/dev
+            if ! git merge --no-ff --no-edit origin/main -m "Back-merge main into dev ($VERSION)"; then
+              git merge --abort
+              echo "::error::Merging main into dev conflicts. Nothing was pushed; dev is untouched."
+              conflict_recipe
+              exit 1
+            fi
+          fi
+
+          git push origin "HEAD:refs/heads/$BRANCH"
+          head_sha=$(git rev-parse --short HEAD)
+
+          {
+            echo "Audit record for the gitflow release back-merge of \`$VERSION\`. **Do not use the merge button.**"
+            echo
+            echo "\`dev\` runs a squash merge queue. Squashing this collapses the two parents and re-diverges \`main\` from \`dev\`, which is the entire point of the back-merge — so this PR is a draft and lands as a fast-forward push instead."
+            echo
+            echo "**Approve it, then land it:**"
+            echo
+            echo '```sh'
+            echo "gh pr review $BRANCH --approve"
+            echo "gh workflow run \"Back-merge main into dev\" -f source=$BRANCH -f land=true"
+            echo '```'
+            echo
+            echo "Landing refuses without an approving review on the tip commit below, and refuses if anyone has changes requested. It re-checks that the branch still contains both \`main\` and \`dev\`, fast-forwards \`dev\` onto it, comments the landed SHA here, and closes this PR."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release | \`$VERSION\` |"
+            echo "| Branch | \`$BRANCH\` @ \`$head_sha\` |"
+            echo "| Prepared by | @$ACTOR |"
+            echo
+            echo "### $commit_count commits back-merged from \`main\`"
+            echo
+            cat /tmp/commits.md
+            if [[ "$commit_count" -gt 200 ]]; then
+              echo
+              echo "_(first 200 shown)_"
+            fi
+          } > /tmp/pr-body.md
+
+          gh label create release-backmerge --color BFD4F2 \
+            --description "Gitflow release back-merge audit PR — lands by push, never by the merge button" \
+            2>/dev/null || true
+
+          pr=$(gh pr list --head "$BRANCH" --base dev --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$pr" ]]; then
+            gh pr edit "$pr" --body-file /tmp/pr-body.md
+            gh pr comment "$pr" --body "Refreshed to \`$head_sha\` by @$ACTOR. $commit_count commits from \`main\`."
+            url=$(gh pr view "$pr" --json url --jq .url)
+          else
+            title="chore: back-merge $VERSION into dev"
+            # Draft so it cannot be queued. Fall back to a normal PR if drafts are
+            # unavailable; the "do not merge" warning is in the body either way.
+            if ! url=$(gh pr create --base dev --head "$BRANCH" --draft \
+                  --title "$title" --body-file /tmp/pr-body.md 2>/dev/null); then
+              echo "::notice::Draft PR creation failed; opening a normal PR instead."
+              url=$(gh pr create --base dev --head "$BRANCH" \
+                  --title "$title" --body-file /tmp/pr-body.md)
+            fi
+            gh pr edit "$url" --add-label release-backmerge || true
+          fi
+
+          {
+            echo "### Back-merge prepared — not landed"
+            echo
+            echo "- Branch: \`$BRANCH\` @ \`$head_sha\`"
+            echo "- PR: $url"
+            echo "- $commit_count commits from \`main\`"
+            echo
+            echo "Review and approve the PR, then land it:"
+            echo
+            echo '```sh'
+            echo "gh pr review $BRANCH --approve"
+            echo "gh workflow run \"Back-merge main into dev\" -f source=$BRANCH -f land=true"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Prepared $BRANCH ($head_sha) and PR $url. dev is untouched until the PR is approved and you dispatch with land=true."
+
+      - name: Land the back-merge on dev
+        if: ${{ inputs.land == true }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SRC: ${{ inputs.source }}
+          VERSION: ${{ steps.cfg.outputs.version }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          if ! git rev-parse --verify -q "refs/remotes/origin/$SRC" >/dev/null; then
+            echo "::error::origin/$SRC does not exist. Dispatch without 'land' first to prepare it."
+            exit 1
+          fi
+
+          pr=$(gh pr list --head "$SRC" --base dev --state open --json number --jq '.[0].number // empty')
+
+          close_pr() {
+            local sha="$1" parents="$2" approvers="${3:-}"
+            [[ -n "$pr" ]] || return 0
+            gh pr comment "$pr" --body "Landed on \`dev\` as \`$sha\` (parents=$parents) by a fast-forward push. Approved by ${approvers:-_(n/a)_}, dispatched by @$ACTOR. Closing — this PR is the audit record and must never be merged through the squash queue."
+            gh pr close "$pr" --delete-branch || gh pr close "$pr"
+          }
+
+          # Idempotent: already landed (by an earlier run, or by hand) -> just tidy up.
+          if git merge-base --is-ancestor "origin/$SRC" origin/dev; then
+            echo "origin/$SRC is already an ancestor of dev; nothing to land."
+            sha=$(git rev-parse --short origin/dev)
+            close_pr "$sha" "$(git show --no-patch --format='%p' origin/dev | wc -w | tr -d ' ')"
+            exit 0
+          fi
+
+          # The PR is the approval carrier, so it has to exist and be approved. No PR, no land.
+          if [[ -z "$pr" ]]; then
+            echo "::error::No open PR from $SRC into dev. Dispatch without 'land' (-f source=$SRC) to open one, get it approved, then land."
+            exit 1
+          fi
+
+          # Approval gate: at least one APPROVED review on the exact commit being landed,
+          # and no outstanding CHANGES_REQUESTED. Only each reviewer's latest review counts,
+          # and approvals of an earlier tip are stale — the branch changed since.
+          tip=$(git rev-parse "origin/$SRC")
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr/reviews" --paginate --jq '
+            [ .[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+                  | {user: .user.login, state: .state, sha: .commit_id, at: .submitted_at} ]
+            | group_by(.user) | map(max_by(.at))')
+          blocked=$(jq -r '[.[] | select(.state == "CHANGES_REQUESTED") | .user] | join(", ")' <<<"$latest")
+          approvers=$(jq -r --arg tip "$tip" '[.[] | select(.state == "APPROVED" and .sha == $tip) | .user] | join(", ")' <<<"$latest")
+          stale=$(jq -r --arg tip "$tip" '[.[] | select(.state == "APPROVED" and .sha != $tip) | .user] | join(", ")' <<<"$latest")
+
+          if [[ -n "$blocked" ]]; then
+            echo "::error::PR #$pr has changes requested by $blocked. Resolve that first."
+            exit 1
+          fi
+          if [[ -z "$approvers" ]]; then
+            if [[ -n "$stale" ]]; then
+              echo "::error::PR #$pr has approvals from $stale, but for an earlier commit — the branch has moved to $(git rev-parse --short "$tip"). Re-approve the current tip."
+            else
+              echo "::error::PR #$pr is not approved. Get an approving review on the current tip ($(git rev-parse --short "$tip")), then re-dispatch:"
+              echo "::error::  gh pr review $pr --approve"
+              echo "::error::If your reviewer cannot approve while the PR is a draft, mark it ready first (gh pr ready $pr) — it still cannot be queued, and 'land' re-verifies everything before pushing."
+            fi
+            exit 1
+          fi
+
+          echo "PR #$pr approved for $(git rev-parse --short "$tip") by $approvers."
+          # Another dev is the norm, but releases happen when nobody else is around. Allowed,
+          # and recorded on the PR and in the run log either way.
+          if [[ ",$approvers," == *",$ACTOR,"* ]]; then
+            echo "::warning::@$ACTOR both approved and landed this back-merge. Fine when nobody else is around, but prefer a second pair of eyes."
+          fi
+
+          # Landing is a fast-forward, so dev must be contained in the branch. If dev has
+          # moved since prepare, re-prepare rather than force anything.
+          if ! git merge-base --is-ancestor origin/dev "origin/$SRC"; then
+            echo "::error::dev is not an ancestor of $SRC — dev moved since this branch was prepared. Re-dispatch without 'land' (-f source=$SRC) to refresh it, re-review, then land."
+            exit 1
+          fi
+
+          # And it must actually carry the release. This is what stops `land` from being a
+          # way to push an arbitrary branch onto dev.
+          if ! git merge-base --is-ancestor origin/main "origin/$SRC"; then
+            echo "::error::$SRC does not contain origin/main, so it is not a back-merge of the release. Refusing to land."
+            exit 1
+          fi
+
+          parents=$(git show --no-patch --format='%p' "origin/$SRC" | wc -w | tr -d ' ')
+          sha=$(git rev-parse --short "origin/$SRC")
+          echo "Landing $SRC ($sha, parents=$parents) on dev as a fast-forward; dispatched by @$ACTOR."
+
+          # The App token bypasses dev's pull request rule, and because this is a git
+          # push it never enters the squash queue, so the merge commit survives.
+          if ! git push origin "refs/remotes/origin/$SRC:refs/heads/dev"; then
+            echo "::error::Push to dev was rejected. Either dev moved (re-prepare and re-review), or the App needs to bypass dev's pull request rule (a repo admin runs this once):"
+            echo "::error::gh api -X PATCH repos/$GITHUB_REPOSITORY/branches/dev/protection/required_pull_request_reviews -f 'bypass_pull_request_allowances[apps][]=<app-slug>'"
+            exit 1
+          fi
+
+          git fetch --quiet origin dev
+
+          # The invariant the whole back-merge exists for: main is contained in dev.
+          if ! git merge-base --is-ancestor origin/main origin/dev; then
+            echo "::error::main is still not an ancestor of dev after the push. The back-merge did not land correctly."
+            exit 1
+          fi
+          if [[ "$parents" != "2" ]]; then
+            echo "::warning::dev's tip has $parents parent(s), not 2 — the tip of $SRC was not the merge commit itself. main is contained in dev, so the back-merge is sound, but check the history."
+          fi
+
+          close_pr "$sha" "$parents" "$approvers"
+
+          {
+            echo "### Back-merge landed on \`dev\`"
+            echo
+            echo "- Release: \`$VERSION\`"
+            echo "- Merge commit: \`$sha\` (parents=$parents)"
+            echo "- From: \`$SRC\` (PR #$pr)"
+            echo "- Approved by: $approvers"
+            echo "- Dispatched by: @$ACTOR"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Landed on dev: $(git rev-parse --short origin/dev)"
