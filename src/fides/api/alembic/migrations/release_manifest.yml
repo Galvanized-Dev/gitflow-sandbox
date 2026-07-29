@@ -1,0 +1,8 @@
+# Newest alembic head per released minor, mirroring
+# fidesplus src/fides/api/alembic/migrations/release_manifest.yml.
+#
+# The Talos skills record a new entry at each release (sprint: the minor; patch: only
+# when the patch ships a migration), which is what advances the "unreleased window"
+# any N-1 back-compat lint bounds itself at.
+releases:
+  "2.0": "a00000000002"
