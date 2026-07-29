@@ -48,6 +48,31 @@ reports `missing_ancestor` for `c00000000001` (it checks each fix against the ta
 isolation), but the parent now rides the same patch, so the correct action is to leave
 it alone. Verifies the skill's judgment, not the script's.
 
+## Scenario 2b — static checks pass, the upgrade still fails
+
+Verified, not hypothetical. Take scenario 2's correct resolution: repoint
+`b00000000002` to `a00000000002`, leave `c00000000001` pointing at `b00000000002`.
+`alembic heads` reports a single head and the downrev preflight reports `ok` — and the
+upgrade dies:
+
+```
+Running upgrade a00000000002 -> b00000000002, Create shadow.audit
+psycopg2.errors.InvalidSchemaName: schema "shadow" does not exist
+```
+
+`b00000000002` creates a table *in* the `shadow` schema, and the `CREATE SCHEMA` lives
+in `b00000000001`, which was excluded from the patch. Head-counting is a graph check; it
+cannot see a dependency on something an excluded migration built.
+
+The lesson for the skills: a repoint is not proven by `alembic heads`. Finish on real
+Postgres via the PROD phase, which stamps a DB at the base tag's head — the shape prod
+is in — and upgrades through the patch tree:
+
+```bash
+ALEMBIC_BIN=<alembic> bash "$RS/verify-migration-reconcile.sh" --repo "$PWD" \
+  --release-ref HEAD --main-ref <spine-tag> --pg-container <pg>
+```
+
 ## Scenario 3 — sprint reconcile, scenario 7 (silently skipped chain)
 
 The patch shipped `c00000000001` repointed to `a00000000002`; `dev` still has it
