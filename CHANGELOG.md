@@ -3,7 +3,12 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.10.0..main)
+## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.10.1..main)
+
+## [2.10.1](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.10.0..2.10.1)
+
+### Fixed
+- Add the missing widget.label column [#64](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/64)
 
 ## [2.10.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.9.0..2.10.0)
 
