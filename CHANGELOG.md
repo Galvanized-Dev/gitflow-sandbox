@@ -3,7 +3,16 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.9.0..main)
+## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.10.0..main)
+
+## [2.10.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.9.0..2.10.0)
+
+### Added
+- Add shadow.report [#57](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/57)
+- Add the shadow schema and audit table [#53](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/53)
+
+### Fixed
+- Add widget.size [#54](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/54)
 
 ## [2.9.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.1..2.9.0)
 
