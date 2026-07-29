@@ -3,7 +3,12 @@
 All notable changes are compiled here from `changelog/` fragments at release time
 by `nox -s "changelog(write)" -- --release VERSION`.
 
-## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.1..main)
+## [Unreleased](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.9.0..main)
+
+## [2.9.0](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.1..2.9.0)
+
+### Developer Experience
+- Mirror fidesplus release automation — drop the abandoned Start/Finish/auto-RC workflows, add the three-phase back-merge bot [#49](https://github.com/Galvanized-Dev/gitflow-sandbox/pull/49)
 
 ## [2.6.1](https://github.com/Galvanized-Dev/gitflow-sandbox/compare/2.6.0..2.6.1)
 
