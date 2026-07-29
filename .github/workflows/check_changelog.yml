@@ -17,13 +17,20 @@ env:
 jobs:
   check-changelog:
     runs-on: ubuntu-latest
-    # Exempt gitflow-generated PRs: release/* and hotfix/* (release->main, the
-    # stabilization branch PRs) and the auto back-merges. Their fragments are
-    # compiled into CHANGELOG.md + deleted at Finish, so they carry no fragment.
+    # Exempt gitflow-generated PRs: release/*, hotfix/* and backmerge/*. Their
+    # fragments are compiled into CHANGELOG.md and deleted before the release ships,
+    # so they carry none of their own.
+    #
+    # Matches fidesplus on the BRANCH PREFIX, not a label. This had drifted to
+    # `contains(labels.*.name, 'backmerge')`, so a correctly-named
+    # `backmerge/*-fragment-cleanup` PR still ran the check and failed it — the
+    # sandbox taught the opposite of what fidesplus does, which is the one thing a
+    # mirror must not do.
     if: >-
-      !startsWith(github.event.pull_request.head.ref, 'release/') &&
-      !startsWith(github.event.pull_request.head.ref, 'hotfix/') &&
-      !contains(github.event.pull_request.labels.*.name, 'backmerge')
+      !startsWith(github.head_ref, 'release/') &&
+      !startsWith(github.head_ref, 'release-') &&
+      !startsWith(github.head_ref, 'hotfix/') &&
+      !startsWith(github.head_ref, 'backmerge/')
     steps:
       - name: Check for changelog entry
         id: check-changelog-files
