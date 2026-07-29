@@ -73,6 +73,30 @@ ALEMBIC_BIN=<alembic> bash "$RS/verify-migration-reconcile.sh" --repo "$PWD" \
   --release-ref HEAD --main-ref <spine-tag> --pg-container <pg>
 ```
 
+## Scenario 2b — static checks pass, the upgrade still fails (verified)
+
+Take scenario 2's correct resolution: repoint `b00000000002` to `a00000000002`, leave
+`c00000000001` pointing at `b00000000002`. `alembic heads` reports a single head and the
+downrev preflight reports `ok` — and the upgrade dies:
+
+```
+Running upgrade a00000000002 -> b00000000002, Create shadow.audit
+psycopg2.errors.InvalidSchemaName: schema "shadow" does not exist
+```
+
+`b00000000002` creates a table *in* the `shadow` schema, whose `CREATE SCHEMA` lives in
+`b00000000001` — excluded from the patch. Head-counting is a graph check; it cannot see a
+dependency on something an excluded migration built.
+
+So a repoint is **not** proven by `alembic heads`. Finish on real Postgres via the PROD
+phase, which stamps a DB at the base tag's head — the shape prod is in — and upgrades
+through the patch tree:
+
+```bash
+ALEMBIC_BIN=<alembic> bash "$RS/verify-migration-reconcile.sh" --repo "$PWD" \
+  --release-ref HEAD --main-ref <spine-tag> --pg-container <pg>
+```
+
 ## Scenario 3 — sprint reconcile, scenario 7 (silently skipped chain)
 
 The patch shipped `c00000000001` repointed to `a00000000002`; `dev` still has it
@@ -109,3 +133,19 @@ that catches scenario 8; `check_migration_downrev.py`-style static guards cannot
   `fresh_verify`, `dev_verify`) and never touches an app database.
 - `alembic` + `psycopg2` on the `ALEMBIC_BIN` you pass. Any venv with those works; the
   sandbox deliberately has no application code to install.
+
+## What the phases actually caught (live run, 2.9.x cycle)
+
+Running the full cycle in this repo, with `d00000000001` on `dev` and `c00000000001`
+already released on `main`:
+
+- The reconcile detected both buried revisions, kept `c00000000001` at **MAIN's** parent,
+  wrote an empty merge joining `(c00000000001, b00000000002)`, and repointed the tail root
+  `d00000000001` onto that merge. All four phases green.
+- Mis-joining deliberately — merge at the tip, child left at `c00000000001` — was
+  **caught**, but by the **DEV-edge** phase, not PROD. PROD passed because alembic's
+  traversal happened to order the sibling chain before the child in this shape.
+
+That is the argument for keeping all four phases rather than trusting one: which phase
+catches a bad join depends on the graph shape, so a green PROD alone proves less than it
+appears to.
